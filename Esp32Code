@@ -1,0 +1,310 @@
+/*
+  ESP32 + Firebase (REST) vending/automation driver
+  With WebSerial logging (all Serial messages mirrored to WebSerial UI).
+*/
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <WebSerial.h>
+#include <vector>   // for collecting transactions
+
+// ====================== CONFIG ======================
+#define WIFI_SSID       "PM"
+#define WIFI_PASSWORD   "123456789"
+
+#define API_KEY         "AIzaSyD7lZMUYcap1gzI1E3HjfGK3tyz4hJgB-s"
+#define DATABASE_URL    "https://zefender-b3b06-default-rtdb.firebaseio.com"
+#define USER_EMAIL      "admin@gmail.com"
+#define USER_PASSWORD   "Admin@123"
+
+// IMPORTANT: Set this differently on each device
+#define MACHINE_ID      "KAL_01"   // Device A
+// #define MACHINE_ID   "RNSIT2"  // Device B
+
+// Relay pins
+#define RELAY_UV      14
+#define RELAY_HOT_AIR 26
+#define RELAY_SMOKE   15
+#define RELAY_EXHAUST 27
+
+// Polling / debounce
+const unsigned long POLL_INTERVAL_MS = 2500;
+const unsigned long COOLDOWN_MS      = 10000;
+
+unsigned long lastPoll = 0;
+unsigned long lastTriggerTime = 0;
+
+String idToken = "";
+unsigned long tokenAcquiredAt = 0;
+const unsigned long TOKEN_MAX_AGE_MS = 45UL * 60UL * 1000UL; // refresh every ~45min
+
+// Web server
+AsyncWebServer server(80);
+
+// ====================== STRUCT ======================
+struct Txn {
+  String key;
+  String pid;
+};
+
+// ====================== LOGGING HELPER ======================
+void logPrint(const String &msg) {
+  Serial.println(msg);
+  WebSerial.println(msg);
+}
+
+// ====================== HELPERS ======================
+void allOff() {
+  digitalWrite(RELAY_UV,       HIGH);
+  digitalWrite(RELAY_HOT_AIR,  HIGH);
+  digitalWrite(RELAY_SMOKE,    HIGH);
+  digitalWrite(RELAY_EXHAUST,  HIGH);
+}
+
+void relayOn(int pin)  { digitalWrite(pin, LOW);  }
+void relayOff(int pin) { digitalWrite(pin, HIGH); }
+
+bool ensureTokenFresh() {
+  if (idToken.length() > 0 && (millis() - tokenAcquiredAt) < TOKEN_MAX_AGE_MS) return true;
+
+  HTTPClient http;
+  String url = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + String(API_KEY);
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  String body = String("{\"email\":\"") + USER_EMAIL +
+                "\",\"password\":\"" + USER_PASSWORD +
+                "\",\"returnSecureToken\":true}";
+
+  int code = http.POST(body);
+  if (code == 200) {
+    DynamicJsonDocument doc(2048);
+    DeserializationError e = deserializeJson(doc, http.getString());
+    if (e) {
+      logPrint("❌ Token JSON parse error");
+      http.end();
+      return false;
+    }
+    idToken = doc["idToken"].as<String>();
+    tokenAcquiredAt = millis();
+    logPrint("✅ Firebase auth refreshed for " + String(MACHINE_ID));
+    http.end();
+    return true;
+  } else {
+    logPrint("❌ Firebase auth failed: " + String(code));
+    logPrint(http.getString());
+    http.end();
+    return false;
+  }
+}
+
+bool fetchPendingForThisMachine(std::vector<Txn> &txns) {
+  if (!ensureTokenFresh()) return false;
+
+  String url = String(DATABASE_URL) +
+               "/transactions.json?orderBy=%22$key%22&limitToLast=50&auth=" + idToken;
+
+  HTTPClient http;
+  http.begin(url);
+  int code = http.GET();
+
+  if (code != 200) {
+    if (code == 401) { idToken = ""; }
+    logPrint("❌ GET transactions error: " + String(code));
+    http.end();
+    return false;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  DynamicJsonDocument doc(64 * 1024);
+  if (deserializeJson(doc, payload)) {
+    logPrint("❌ JSON parsing error on transactions");
+    return false;
+  }
+
+  for (JsonPair kv : doc.as<JsonObject>()) {
+    JsonObject t = kv.value().as<JsonObject>();
+    String status = t["status"] | "";
+    bool used = t["used"] | false;
+    String machine = t["machine_id"] | "";
+    String pid = t["payment_id"] | "";
+
+    bool okStatus = (status == "authorized" || status == "captured");
+    if (!used && okStatus && machine == MACHINE_ID) {
+      Txn txn = { kv.key().c_str(), pid };
+      txns.push_back(txn);
+    }
+  }
+
+  return txns.size() > 0;
+}
+
+bool markTransactionUsed(const String &txnKey, const String &paymentId) {
+  if (!ensureTokenFresh()) return false;
+
+  String url = String(DATABASE_URL) + "/transactions/" + txnKey + ".json?auth=" + idToken;
+
+  StaticJsonDocument<256> patch;
+  patch["used"] = true;
+  patch["status"] = "authorized";
+  patch["payment_id"] = paymentId;
+  patch["processed_by"] = MACHINE_ID;
+  patch["processed_at"] = millis();
+
+  String body;
+  serializeJson(patch, body);
+
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.PATCH(body);
+
+  if (code == 200) {
+    logPrint("✅ Marked transaction " + txnKey + " as used");
+    http.end();
+    return true;
+  } else {
+    logPrint("❌ Failed to mark used: " + String(code));
+    logPrint(http.getString());
+    http.end();
+    return false;
+  }
+}
+
+// ====================== SANITIZATION SEQUENCE ======================
+void runSanitizationSequence() {
+  logPrint("🔁 Starting new sanitization sequence...");
+
+  // Step 1: Exhaust ON
+  relayOn(RELAY_EXHAUST); 
+  logPrint("Exhaust ON");
+  delay(10000);
+
+  // // Step 2: Hot Air + UV ON
+  // relayOn(RELAY_UV); 
+  // delay(10000);
+  // relayOff(RELAY_UV); 
+  // logPrint("Hot Air + UV OFF");
+  
+  // relayOn(RELAY_HOT_AIR); 
+  // logPrint("Hot Air + UV ON");
+  // delay(15000);
+
+  // // Step 3: Hot Air OFF
+  // relayOff(RELAY_HOT_AIR); 
+  // delay(5000);
+  
+  // // Step 4: Smoke ON
+  // relayOn(RELAY_SMOKE); 
+  // logPrint("Smoke ON");
+  // delay(3000);
+  // relayOff(RELAY_SMOKE); 
+  // logPrint("Smoke OFF");
+
+  // // Step 5: Wait
+  // delay(18000);
+
+  // // Step 6: Hot Air + UV ON again
+  // relayOn(RELAY_UV); 
+  // delay(10000);
+  // relayOff(RELAY_UV); 
+  // relayOn(RELAY_HOT_AIR); 
+  // logPrint("Hot Air + UV ON (2nd)");
+  // delay(15000);
+  // relayOff(RELAY_HOT_AIR); 
+  // logPrint("Hot Air + UV OFF(2nd)");
+
+  // // Step 7: Smoke ON again
+  // relayOn(RELAY_SMOKE); 
+  // logPrint("Smoke ON (2nd)");
+  // delay(3000);
+  // relayOff(RELAY_SMOKE); 
+  // logPrint("Smoke OFF (2nd)");
+  // delay(18000);
+
+  // // Step 8: Final Hot Air + UV
+  // relayOn(RELAY_UV); 
+  // delay(10000);
+  // relayOff(RELAY_UV); 
+  // relayOn(RELAY_HOT_AIR); 
+  // logPrint("Hot Air + UV ON (3rd)");
+  // delay(20000);
+  // relayOff(RELAY_HOT_AIR); 
+  // logPrint("Hot Air + UV OFF (3rd)");
+  // delay(20000);
+
+  // Step 9: All OFF
+  allOff();
+  logPrint("✅ Sanitization complete.");
+}
+
+// ====================== WEB SERIAL CALLBACK ======================
+void recvMsg(uint8_t *data, size_t len) {
+  String d = "";
+  for (int i = 0; i < len; i++) d += char(data[i]);
+  logPrint("📩 WebSerial Received: " + d);
+
+  if (d == "RESET") {
+    ESP.restart();
+  }
+}
+
+// ====================== SETUP / LOOP ======================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(RELAY_UV, OUTPUT);
+  pinMode(RELAY_HOT_AIR, OUTPUT);
+  pinMode(RELAY_SMOKE, OUTPUT);
+  pinMode(RELAY_EXHAUST, OUTPUT);
+  allOff();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    logPrint("❌ WiFi Failed!");
+    return;
+  }
+  logPrint("✅ WiFi Connected. IP: " + WiFi.localIP().toString());
+
+  WebSerial.begin(&server);
+  WebSerial.onMessage(recvMsg);
+  server.begin();
+
+  ensureTokenFresh();
+}
+
+void loop() {
+  if (millis() - lastPoll >= POLL_INTERVAL_MS) {
+    lastPoll = millis();
+
+    std::vector<Txn> txns;
+    if (fetchPendingForThisMachine(txns)) {
+      unsigned long now = millis();
+      if (now - lastTriggerTime >= COOLDOWN_MS) {
+        logPrint("🧾 Found " + String(txns.size()) + " new payments for " + MACHINE_ID);
+
+        runSanitizationSequence();
+
+        // ✅ Mark all as used
+        for (auto &txn : txns) {
+          if (!markTransactionUsed(txn.key, txn.pid)) {
+            logPrint("⚠ Failed to mark: " + txn.key);
+          }
+        }
+
+        lastTriggerTime = now;
+      } else {
+        logPrint("⏳ Cooldown active; ignoring trigger.");
+      }
+    } else {
+      logPrint("🔎 No pending txn for this machine.");
+    }
+  }
+  delay(50);
+}
