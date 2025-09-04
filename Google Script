@@ -1,0 +1,115 @@
+
+//Kerala final 
+function doPost(e) {
+  try {
+    if (!e || !e.postData || !e.postData.contents) {
+      throw new Error("No POST data received");
+    }
+
+    const raw = e.postData.contents;
+    const parsed = JSON.parse(raw);
+    const paymentEntity = parsed?.payload?.payment?.entity;
+
+    if (!paymentEntity) throw new Error("Missing payment entity");
+
+    // --- Defaults ---
+    let machine_name = "unknown";
+    let machine_id = "unknown";
+    let customer_name = "unknown";
+    let customer_phone = "unknown";
+    let customer_email = "unknown";
+
+    // --- Case 1: Notes available (API initiated payments) ---
+    if (paymentEntity.notes) {
+      machine_id = paymentEntity.notes.machine || paymentEntity.notes.machine_id || machine_id;
+      customer_name = paymentEntity.notes.customer_name || customer_name;
+      customer_phone = paymentEntity.notes.customer_phone || customer_phone;
+      customer_email = paymentEntity.notes.customer_email || customer_email;
+    }
+
+    // --- Case 2: Description string (QR / UPI link initiated) ---
+    if (paymentEntity.description && paymentEntity.description.includes("Machine")) {
+      try {
+        // Example format:
+        // "Machine: RNSIT CSE, Machine_ID: RNSIT_01, Name: N Krishna Murthy, Phone: 9876543216, Email: krishna@gmail.com"
+        const desc = paymentEntity.description;
+        const parts = desc.split(",").map(s => s.trim());
+
+        parts.forEach(part => {
+          if (part.startsWith("Machine:")) {
+            machine_name = part.split("Machine:")[1].trim();
+          }
+          if (part.startsWith("Machine_ID:")) {
+            machine_id = part.split("Machine_ID:")[1].trim();
+          }
+          if (part.startsWith("Name:")) {
+            customer_name = part.split("Name:")[1].trim();
+          }
+          if (part.startsWith("Phone:")) {
+            customer_phone = part.split("Phone:")[1].trim();
+          }
+          if (part.startsWith("Email:")) {
+            customer_email = part.split("Email:")[1].trim();
+          }
+        });
+      } catch (err) {
+        Logger.log("Description parse error: " + err);
+      }
+    }
+
+    // --- Transaction data ---
+    const transactionData = {
+      payment_id: paymentEntity.id,
+      status: paymentEntity.status,
+      vpa: paymentEntity.vpa || paymentEntity.upi?.vpa || "not_available",
+      used: false,
+      created_at: new Date().toISOString(),
+      machine_name: machine_name,
+      machine_id: machine_id,
+      customer_name: customer_name,
+      customer_phone: customer_phone,
+      customer_email: customer_email
+    };
+
+    // --- Push to Firebase ---
+    const firebaseUrl = "https://zefender-b3b06-default-rtdb.firebaseio.com/transactions.json";
+    const options = {
+      method: "POST",
+      contentType: "application/json",
+      payload: JSON.stringify(transactionData)
+    };
+
+    const response = UrlFetchApp.fetch(firebaseUrl, options);
+    Logger.log("Stored in Firebase: " + response.getContentText());
+
+    return ContentService.createTextOutput("✅ Stored");
+  } catch (err) {
+    Logger.log("Webhook Error: " + err);
+    return ContentService.createTextOutput("❌ Error: " + err.toString());
+  }
+}
+
+// --- Test helper: Simulate a payment POST ---
+function testPaymentRNSIT() {
+  const fakePayment = {
+    payload: {
+      payment: {
+        entity: {
+          id: "pay_test_1376",
+          status: "authorized",
+          vpa: "testuser@upi",
+          description: "Machine: RNSIT CSE, Machine_ID: KAL_01, Name: N Krishna Murthy, Phone: 9876543216, Email: krishna@gmail.com"
+        }
+      }
+    }
+  };
+
+  const e = {
+    postData: {
+      contents: JSON.stringify(fakePayment)
+    }
+  };
+
+  const result = doPost(e);
+  Logger.log("Result: " + result.getContent());
+}
