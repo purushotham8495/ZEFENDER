@@ -1,5 +1,3 @@
-
-//Kerala final 
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
@@ -19,7 +17,7 @@ function doPost(e) {
     let customer_phone = "unknown";
     let customer_email = "unknown";
 
-    // --- Case 1: Notes available (API initiated payments) ---
+    // --- Case 1: Notes available ---
     if (paymentEntity.notes) {
       machine_id = paymentEntity.notes.machine || paymentEntity.notes.machine_id || machine_id;
       customer_name = paymentEntity.notes.customer_name || customer_name;
@@ -27,11 +25,9 @@ function doPost(e) {
       customer_email = paymentEntity.notes.customer_email || customer_email;
     }
 
-    // --- Case 2: Description string (QR / UPI link initiated) ---
+    // --- Case 2: Description string ---
     if (paymentEntity.description && paymentEntity.description.includes("Machine")) {
       try {
-        // Example format:
-        // "Machine: RNSIT CSE, Machine_ID: RNSIT_01, Name: N Krishna Murthy, Phone: 9876543216, Email: krishna@gmail.com"
         const desc = paymentEntity.description;
         const parts = desc.split(",").map(s => s.trim());
 
@@ -71,10 +67,12 @@ function doPost(e) {
       customer_email: customer_email
     };
 
-    // --- Push to Firebase ---
-    const firebaseUrl = "https://zefender-b3b06-default-rtdb.firebaseio.com/transactions.json";
+    // --- Firebase (transactions collection) ---
+    const firebaseBase = "https://zefender-b3b06-default-rtdb.firebaseio.com/transactions";
+    const firebaseUrl = firebaseBase + "/" + paymentEntity.id + ".json"; // payment_id as key
+
     const options = {
-      method: "POST",
+      method: "PUT",  // ensures overwrite instead of duplicate
       contentType: "application/json",
       payload: JSON.stringify(transactionData)
     };
@@ -82,7 +80,7 @@ function doPost(e) {
     const response = UrlFetchApp.fetch(firebaseUrl, options);
     Logger.log("Stored in Firebase: " + response.getContentText());
 
-    return ContentService.createTextOutput("✅ Stored");
+    return ContentService.createTextOutput("✅ Stored: " + paymentEntity.id);
   } catch (err) {
     Logger.log("Webhook Error: " + err);
     return ContentService.createTextOutput("❌ Error: " + err.toString());
@@ -113,3 +111,9 @@ function testPaymentRNSIT() {
   const result = doPost(e);
   Logger.log("Result: " + result.getContent());
 }
+
+
+
+
+
+
