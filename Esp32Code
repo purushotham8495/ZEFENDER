@@ -10,6 +10,18 @@
 #include <ESPAsyncWebServer.h>
 #include <WebSerial.h>
 #include <vector>   // for collecting transactions
+#include "pitches.h"
+
+#define BUZZER_PIN  23  // ESP32 GPIO23 connected directly to the buzzer
+
+int melody[] = {
+  NOTE_C4, NOTE_G3, NOTE_G3, NOTE_A3, NOTE_G3, 0, NOTE_B3, NOTE_C4
+};
+
+int noteDurations[] = {
+  4, 8, 8, 4, 4, 4, 4, 4
+};
+
 
 // ====================== CONFIG ======================
 #define WIFI_SSID       "PM"
@@ -21,7 +33,7 @@
 #define USER_PASSWORD   "Admin@123"
 
 // IMPORTANT: Set this differently on each device
-#define MACHINE_ID      "KAL_01"   // Device A
+#define MACHINE_ID      "KAL_02"   // Device A
 // #define MACHINE_ID   "RNSIT2"  // Device B
 
 // Relay pins
@@ -183,63 +195,73 @@ void runSanitizationSequence() {
   // Step 1: Exhaust ON
   relayOn(RELAY_EXHAUST); 
   logPrint("Exhaust ON");
-  delay(10000);
+  delay(15000);
 
-  // // Step 2: Hot Air + UV ON
-  // relayOn(RELAY_UV); 
-  // delay(10000);
-  // relayOff(RELAY_UV); 
-  // logPrint("Hot Air + UV OFF");
+  // Step 2: Hot Air + UV ON
+  relayOn(RELAY_UV); 
+  delay(20000);
+  relayOff(RELAY_UV); 
+  logPrint("Hot Air + UV OFF");
   
-  // relayOn(RELAY_HOT_AIR); 
-  // logPrint("Hot Air + UV ON");
-  // delay(15000);
+  relayOn(RELAY_HOT_AIR); 
+  logPrint("Hot Air + UV ON");
+  delay(25000);
 
-  // // Step 3: Hot Air OFF
-  // relayOff(RELAY_HOT_AIR); 
-  // delay(5000);
+  // Step 3: Hot Air OFF
+  relayOff(RELAY_HOT_AIR); 
+  delay(5000);
   
-  // // Step 4: Smoke ON
-  // relayOn(RELAY_SMOKE); 
-  // logPrint("Smoke ON");
-  // delay(3000);
-  // relayOff(RELAY_SMOKE); 
-  // logPrint("Smoke OFF");
+  // Step 4: Smoke ON
+  relayOn(RELAY_SMOKE); 
+  logPrint("Smoke ON");
+  delay(2500);
+  relayOff(RELAY_SMOKE); 
+  logPrint("Smoke OFF");
 
-  // // Step 5: Wait
-  // delay(18000);
+  // Step 5: Wait
+  delay(25000);
 
-  // // Step 6: Hot Air + UV ON again
-  // relayOn(RELAY_UV); 
-  // delay(10000);
-  // relayOff(RELAY_UV); 
-  // relayOn(RELAY_HOT_AIR); 
-  // logPrint("Hot Air + UV ON (2nd)");
-  // delay(15000);
-  // relayOff(RELAY_HOT_AIR); 
-  // logPrint("Hot Air + UV OFF(2nd)");
+  // Step 6: Hot Air + UV ON again
+  relayOn(RELAY_UV); 
+  delay(25000);
+  relayOff(RELAY_UV); 
+  relayOn(RELAY_HOT_AIR); 
+  logPrint("Hot Air + UV ON (2nd)");
+  delay(25000);
+  relayOff(RELAY_HOT_AIR); 
+  logPrint("Hot Air + UV OFF(2nd)");
 
-  // // Step 7: Smoke ON again
-  // relayOn(RELAY_SMOKE); 
-  // logPrint("Smoke ON (2nd)");
-  // delay(3000);
-  // relayOff(RELAY_SMOKE); 
-  // logPrint("Smoke OFF (2nd)");
-  // delay(18000);
+  // Step 7: Smoke ON again
+  relayOn(RELAY_SMOKE); 
+  logPrint("Smoke ON (2nd)");
+  delay(2000);
+  relayOff(RELAY_SMOKE); 
+  logPrint("Smoke OFF (2nd)");
+  delay(25000);
 
-  // // Step 8: Final Hot Air + UV
-  // relayOn(RELAY_UV); 
-  // delay(10000);
-  // relayOff(RELAY_UV); 
-  // relayOn(RELAY_HOT_AIR); 
-  // logPrint("Hot Air + UV ON (3rd)");
-  // delay(20000);
-  // relayOff(RELAY_HOT_AIR); 
-  // logPrint("Hot Air + UV OFF (3rd)");
-  // delay(20000);
+  // Step 8: Final Hot Air + UV
+  relayOn(RELAY_UV); 
+  delay(40000);
+  relayOff(RELAY_UV); 
+  relayOn(RELAY_HOT_AIR); 
+  logPrint("Hot Air + UV ON (3rd)");
+  delay(30000);
+  allOff();
+    for (int thisNote = 0; thisNote < 8; thisNote++) {
+    int noteDuration = 1000 / noteDurations[thisNote];
+    tone(BUZZER_PIN, melody[thisNote], noteDuration);
+
+    int pauseBetweenNotes = noteDuration * 1.30;
+    delay(pauseBetweenNotes);
+
+    noTone(BUZZER_PIN);
+  }
+
+
+  
 
   // Step 9: All OFF
-  allOff();
+  
   logPrint("✅ Sanitization complete.");
 }
 
